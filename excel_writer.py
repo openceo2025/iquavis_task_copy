@@ -97,6 +97,10 @@ def write_tasks_xlsx(
     """
     try:
         from openpyxl import Workbook
+        from openpyxl.styles import PatternFill, Protection
+        from openpyxl.utils import get_column_letter
+        from openpyxl.formatting.rule import FormulaRule
+        from openpyxl.worksheet.protection import SheetProtection
     except Exception as e:
         raise RuntimeError(
             "openpyxl is required to export .xlsx. Please install via 'pip install openpyxl'."
@@ -124,6 +128,39 @@ def write_tasks_xlsx(
     # Rows
     for row in flat_rows:
         ws_tasks.append([_sanitize(row.get(h)) for h in headers])
+
+    # Mirror original values on a hidden sheet for change tracking
+    ws_orig = wb.create_sheet("_original")
+    ws_orig.append([_sanitize(h) for h in headers])
+    for row in flat_rows:
+        ws_orig.append([_sanitize(row.get(h)) for h in headers])
+    ws_orig.sheet_state = "hidden"
+
+    # Highlight cells edited by users compared to the original sheet
+    max_col_letter = get_column_letter(len(headers))
+    max_row = len(flat_rows) + 1
+    data_range = f"A1:{max_col_letter}{max_row}"
+    yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    ws_tasks.conditional_formatting.add(
+        data_range, FormulaRule(formula=["A1<>_original!A1"], fill=yellow_fill)
+    )
+
+    # Allow editing cells but disallow row/column manipulation
+    for row in ws_tasks.iter_rows(min_row=1, max_row=max_row, max_col=len(headers)):
+        for cell in row:
+            cell.protection = Protection(locked=False)
+    ws_tasks.protection = SheetProtection(
+        sheet=True,
+        formatColumns=False,
+        formatRows=False,
+        insertColumns=False,
+        insertRows=False,
+        deleteColumns=False,
+        deleteRows=False,
+        sort=False,
+        autoFilter=False,
+        pivotTables=False,
+    )
 
     safe_name = sanitize_filename(project_name)
     file_name = f"tasks_{safe_name}.xlsx"
