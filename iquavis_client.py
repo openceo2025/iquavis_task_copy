@@ -21,7 +21,7 @@ class IQuavisClient:
     - Project and Task retrieval helpers
     """
 
-    def __init__(self, base_url: Optional[str] = None, timeout: int = 30, debug: bool = False) -> None:
+    def __init__(self, base_url: Optional[str] = None, timeout: int = 60, debug: bool = False) -> None:
         self.base_url = base_url or os.getenv("IQUAVIS_BASE_URL", DEFAULT_BASE_URL)
         self.timeout = timeout
         self.debug = debug or bool(os.getenv("IQUAVIS_DEBUG"))
