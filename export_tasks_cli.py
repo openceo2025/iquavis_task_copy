@@ -2,10 +2,10 @@ import os
 import sys
 import argparse
 from getpass import getpass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from iquavis_client import IQuavisClient
-from excel_writer import write_tasks_xlsx
+from excel_writer import collect_headers, flatten_dict, write_tasks_xlsx
 
 
 DEFAULT_INCLUDES = [
@@ -95,6 +95,45 @@ def choose_project(projects: List[Dict[str, Any]]) -> Dict[str, Any]:
         return projects[n - 1]
 
 
+def load_projects_from_sheet(path: str) -> Tuple[Optional[List[List[Any]]], Optional[List[Dict[str, Any]]]]:
+    """Load project rows and dictionaries from an existing Excel workbook."""
+    if not path:
+        return None, None
+    if not os.path.exists(path):
+        print("Specified Excel file not found; fetching projects from server.")
+        return None, None
+    try:
+        from openpyxl import load_workbook
+    except Exception as e:
+        print(f"openpyxl is required to load existing workbook: {e}")
+        return None, None
+
+    try:
+        wb = load_workbook(path, data_only=True)
+    except Exception as e:
+        print(f"Failed to load workbook '{path}': {e}")
+        return None, None
+
+    if "project" not in wb.sheetnames:
+        return None, None
+    ws = wb["project"]
+    rows = list(ws.iter_rows(values_only=True))
+    if len(rows) < 2:
+        return None, None
+
+    headers = [str(h) if h is not None else "" for h in rows[0]]
+    projects: List[Dict[str, Any]] = []
+    for r in rows[1:]:
+        if all(c is None for c in r):
+            continue
+        proj = {headers[i]: r[i] for i in range(len(headers))}
+        projects.append(proj)
+
+    if not projects:
+        return None, None
+    return rows, projects
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -102,12 +141,18 @@ def main() -> None:
 
     client = prompt_login(debug=args.debug)
 
-    # List all accessible projects
-    try:
-        projects = client.list_projects()
-    except Exception as e:
-        print(f"Failed to fetch projects: {e}")
-        sys.exit(1)
+    existing_path = input("Existing Excel file path (leave blank if none): ").strip()
+    project_rows, projects = load_projects_from_sheet(existing_path)
+
+    if not projects:
+        try:
+            projects = client.list_projects()
+        except Exception as e:
+            print(f"Failed to fetch projects: {e}")
+            sys.exit(1)
+        flat_projects = [flatten_dict(p) for p in projects]
+        proj_headers = collect_headers(flat_projects)
+        project_rows = [proj_headers] + [[fp.get(h) for h in proj_headers] for fp in flat_projects]
 
     project = choose_project(projects)
     proj_id, proj_name = client.project_identity(project)
@@ -131,7 +176,13 @@ def main() -> None:
     # Write to Excel in the same directory as this script
     script_dir = os.path.dirname(os.path.abspath(__file__))
     try:
-        out_path = write_tasks_xlsx(tasks_unwrapped, proj_name, script_dir, extra_headers=DEFAULT_EXTRA_HEADERS)
+        out_path = write_tasks_xlsx(
+            tasks_unwrapped,
+            proj_name,
+            script_dir,
+            extra_headers=DEFAULT_EXTRA_HEADERS,
+            project_sheet_rows=project_rows,
+        )
     except Exception as e:
         print(f"Export failed: {e}")
         sys.exit(1)

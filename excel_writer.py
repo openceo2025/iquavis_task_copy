@@ -1,7 +1,9 @@
 import json
 import os
 import re
-from typing import Any, Dict, Iterable, List, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+
+ILLEGAL_CHARACTERS_RE = re.compile(r"[\x00-\x08\x0B-\x0C\x0E-\x1F]")
 
 
 def _is_primitive(x: Any) -> bool:
@@ -80,30 +82,48 @@ def next_available_path(base_dir: str, base_name: str) -> str:
     return candidate
 
 
-def write_tasks_xlsx(tasks: List[Dict[str, Any]], project_name: str, out_dir: str, extra_headers: Iterable[str] = ()) -> str:
+def write_tasks_xlsx(
+    tasks: List[Dict[str, Any]],
+    project_name: str,
+    out_dir: str,
+    extra_headers: Iterable[str] = (),
+    project_sheet_rows: Optional[Iterable[Iterable[Any]]] = None,
+) -> str:
     """
-    Write tasks to an .xlsx file with a header containing the union of all flattened keys.
-    Returns the absolute path to the written file.
+    Write tasks to an .xlsx file with a header containing the union of all
+    flattened keys. A "project" sheet is created as the left-most sheet using
+    ``project_sheet_rows`` if provided. Returns the absolute path to the written
+    file.
     """
     try:
         from openpyxl import Workbook
     except Exception as e:
-        raise RuntimeError("openpyxl is required to export .xlsx. Please install via 'pip install openpyxl'.") from e
+        raise RuntimeError(
+            "openpyxl is required to export .xlsx. Please install via 'pip install openpyxl'."
+        ) from e
+
+    def _sanitize(value: Any) -> Any:
+        if isinstance(value, str):
+            return ILLEGAL_CHARACTERS_RE.sub("", value)
+        return value
 
     # First flatten rows; keep in memory for simplicity and consistent headers
     flat_rows: List[Dict[str, Any]] = [flatten_dict(t) for t in tasks]
     headers = collect_headers(flat_rows, extra_headers=extra_headers)
 
     wb = Workbook()
-    ws = wb.active
-    ws.title = "Tasks"
+    ws_project = wb.active
+    ws_project.title = "project"
 
-    # Header
-    ws.append(headers)
+    for row in project_sheet_rows or []:
+        ws_project.append([_sanitize(c) for c in row])
+
+    ws_tasks = wb.create_sheet("tasks")
+    ws_tasks.append([_sanitize(h) for h in headers])
 
     # Rows
     for row in flat_rows:
-        ws.append([row.get(h) for h in headers])
+        ws_tasks.append([_sanitize(row.get(h)) for h in headers])
 
     safe_name = sanitize_filename(project_name)
     file_name = f"tasks_{safe_name}.xlsx"
