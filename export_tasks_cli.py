@@ -134,6 +134,32 @@ def load_projects_from_sheet(path: str) -> Tuple[Optional[List[List[Any]]], Opti
     return rows, projects
 
 
+def select_existing_excel_file() -> str:
+    """Open a GUI dialog to select an existing Excel file.
+
+    Returns the chosen path or an empty string if the user cancels or if
+    ``tkinter`` is unavailable.
+    """
+    try:
+        from tkinter import Tk, filedialog
+    except Exception as e:
+        print(f"tkinter is required for file selection: {e}")
+        return ""
+
+    try:
+        root = Tk()
+        root.withdraw()
+        path = filedialog.askopenfilename(
+            title="Select existing Excel file (Cancel for none)",
+            filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")],
+        )
+        root.destroy()
+        return path.strip()
+    except Exception as e:
+        print(f"File selection dialog failed: {e}")
+        return ""
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -141,7 +167,8 @@ def main() -> None:
 
     client = prompt_login(debug=args.debug)
 
-    existing_path = input("Existing Excel file path (leave blank if none): ").strip()
+    print("Select existing Excel file (Cancel if none).")
+    existing_path = select_existing_excel_file()
     project_rows, projects = load_projects_from_sheet(existing_path)
 
     if not projects:
