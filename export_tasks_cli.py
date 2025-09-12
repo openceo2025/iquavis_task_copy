@@ -1,5 +1,6 @@
 import os
 import sys
+import argparse
 from getpass import getpass
 from typing import Any, Dict, List
 
@@ -54,9 +55,9 @@ DEFAULT_EXTRA_HEADERS = [
 ]
 
 
-def prompt_login() -> IQuavisClient:
+def prompt_login(debug: bool = False) -> IQuavisClient:
     base_url = os.getenv("IQUAVIS_BASE_URL")  # Optional override
-    client = IQuavisClient(base_url=base_url)
+    client = IQuavisClient(base_url=base_url, debug=debug)
 
     print("iQUAVIS login")
     user_id = input("User ID: ").strip()
@@ -95,7 +96,11 @@ def choose_project(projects: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def main() -> None:
-    client = prompt_login()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args()
+
+    client = prompt_login(debug=args.debug)
 
     # List all accessible projects
     try:
