@@ -21,13 +21,18 @@ class IQuavisClient:
     - Project and Task retrieval helpers
     """
 
-    def __init__(self, base_url: Optional[str] = None, timeout: int = 30) -> None:
+    def __init__(self, base_url: Optional[str] = None, timeout: int = 30, debug: bool = False) -> None:
         self.base_url = base_url or os.getenv("IQUAVIS_BASE_URL", DEFAULT_BASE_URL)
         self.timeout = timeout
+        self.debug = debug or bool(os.getenv("IQUAVIS_DEBUG"))
         self.session = requests.Session()
         # In trusted internal environments, certificate validation is disabled per samples
         self.session.verify = False
         self.access_token: Optional[str] = None
+
+    def _log(self, message: str) -> None:
+        if self.debug:
+            print(f"[DEBUG] {message}")
 
     # -------------------- Core HTTP --------------------
     def _auth_header(self) -> Dict[str, str]:
@@ -41,21 +46,33 @@ class IQuavisClient:
         eff_params = dict(params or {})
         # Increase default page size as done in refs
         eff_params.setdefault("count", 10000)
-        r = self.session.get(url, headers=headers, params=eff_params, timeout=self.timeout)
-        r.raise_for_status()
-        return r.json()
+        self._log(f"GET {url} params={eff_params}")
+        try:
+            r = self.session.get(url, headers=headers, params=eff_params, timeout=self.timeout)
+            self._log(f"-> {r.status_code} {r.text[:200]}")
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            self._log(f"GET {url} failed: {e}")
+            raise
 
     def _post(self, path: str, json_body: Any, params: Optional[Dict[str, Any]] = None) -> Any:
         url = f"{self.base_url}{path}"
         headers = {"Content-Type": "application/json", **self._auth_header()}
-        r = self.session.post(url, headers=headers, json=json_body, params=params or {}, timeout=self.timeout)
-        if r.status_code in (200, 201):
-            try:
-                return r.json()
-            except ValueError:
-                return {"status": r.status_code}
-        r.raise_for_status()
-        return r.json()
+        self._log(f"POST {url} json={json_body} params={params or {}}")
+        try:
+            r = self.session.post(url, headers=headers, json=json_body, params=params or {}, timeout=self.timeout)
+            self._log(f"-> {r.status_code} {r.text[:200]}")
+            if r.status_code in (200, 201):
+                try:
+                    return r.json()
+                except ValueError:
+                    return {"status": r.status_code}
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            self._log(f"POST {url} failed: {e}")
+            raise
 
     # -------------------- Auth --------------------
     def login(self, user_id: str, password: str) -> str:
@@ -66,7 +83,9 @@ class IQuavisClient:
         url = f"{self.base_url}/token"
         payload = {"grant_type": "password", "username": user_id, "password": password}
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        self._log(f"POST {url} data={{'grant_type': 'password', 'username': '***', 'password': '***'}}")
         r = self.session.post(url, headers=headers, data=payload, timeout=self.timeout)
+        self._log(f"-> {r.status_code} {r.text[:200]}")
         r.raise_for_status()
         token = r.json().get("access_token")
         if not token:
