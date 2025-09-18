@@ -128,7 +128,7 @@ def _cell_rgb(cell: Any) -> Optional[str]:
     return None
 
 
-def collect_task_rows(ws: Any) -> List[TaskRow]:
+def collect_task_rows(ws: Any, original_ws: Optional[Any] = None) -> List[TaskRow]:
     headers: List[str] = []
     rows: List[TaskRow] = []
     for row in ws.iter_rows(min_row=1, values_only=False):
@@ -149,9 +149,17 @@ def collect_task_rows(ws: Any) -> List[TaskRow]:
             if cell_value not in (None, ""):
                 has_value = True
             rgb = _cell_rgb(cell)
+            coord = (cell.row, cell.column)
             if rgb and (rgb in YELLOW_RGBS or rgb == "INDEXED_YELLOW"):
-                yellow_cells.append((cell.row, cell.column))
-            values[header] = normalize_value(cell_value)
+                yellow_cells.append(coord)
+            normalized_value = normalize_value(cell_value)
+            values[header] = normalized_value
+
+            if original_ws is not None:
+                original_cell = original_ws.cell(row=cell.row, column=cell.column)
+                original_value = normalize_value(original_cell.value)
+                if normalized_value != original_value and coord not in yellow_cells:
+                    yellow_cells.append(coord)
 
         if not has_value:
             continue
@@ -217,14 +225,23 @@ def main() -> None:
         print(f"Failed to load workbook: {exc}")
         sys.exit(1)
 
-    if "tasks" not in wb.sheetnames:
+    tasks_sheet_name = "tasks"
+    if tasks_sheet_name not in wb.sheetnames:
         print("The workbook does not contain a 'tasks' sheet.")
         sys.exit(1)
 
-    ws_tasks = wb["tasks"]
-    task_rows = collect_task_rows(ws_tasks)
+    ws_tasks = wb[tasks_sheet_name]
+    original_sheet_name = f"{tasks_sheet_name}_original"
+    ws_tasks_original = wb[original_sheet_name] if original_sheet_name in wb.sheetnames else None
+
+    task_rows = collect_task_rows(ws_tasks, original_ws=ws_tasks_original)
     if not task_rows:
         print("No rows with yellow cells were found in the 'tasks' sheet.")
+        if ws_tasks_original is None:
+            print(
+                "If you expected updates to be detected automatically, add a 'tasks_original' "
+                "sheet or highlight the cells to import."
+            )
         sys.exit(0)
 
     total = len(task_rows)
