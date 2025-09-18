@@ -74,6 +74,24 @@ class IQuavisClient:
             self._log(f"POST {url} failed: {e}")
             raise
 
+    def _put(self, path: str, json_body: Any, params: Optional[Dict[str, Any]] = None) -> Any:
+        url = f"{self.base_url}{path}"
+        headers = {"Content-Type": "application/json", **self._auth_header()}
+        self._log(f"PUT {url} json={json_body} params={params or {}}")
+        try:
+            r = self.session.put(url, headers=headers, json=json_body, params=params or {}, timeout=self.timeout)
+            self._log(f"-> {r.status_code} {r.text[:200]}")
+            if r.status_code in (200, 201):
+                try:
+                    return r.json()
+                except ValueError:
+                    return {"status": r.status_code}
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            self._log(f"PUT {url} failed: {e}")
+            raise
+
     # -------------------- Auth --------------------
     def login(self, user_id: str, password: str) -> str:
         """
@@ -144,3 +162,21 @@ class IQuavisClient:
         if isinstance(item, dict) and "Task" in item and isinstance(item["Task"], dict):
             return item["Task"]
         return item
+
+    # -------------------- Task mutation --------------------
+    def update_task(self, project_id: str, task_id: str, payload: Dict[str, Any]) -> Any:
+        """
+        Update a task within a project. The API expects a Task wrapper in line
+        with list responses, so the provided payload is wrapped in a
+        ``{"Task": payload}`` envelope. ``task_id`` is stringified to guard
+        against numeric IDs coming from Excel.
+        """
+
+        if not project_id:
+            raise ValueError("project_id is required")
+        if not task_id:
+            raise ValueError("task_id is required")
+
+        path = f"/v1/projects/{project_id}/tasks/{task_id}"
+        body = {"Task": payload}
+        return self._put(path, json_body=body)
