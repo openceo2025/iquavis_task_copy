@@ -5,6 +5,10 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 ILLEGAL_CHARACTERS_RE = re.compile(r"[\x00-\x08\x0B-\x0C\x0E-\x1F]")
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+EXCEL_TEMPLATE_DIR = os.path.join(BASE_DIR, "excel_template")
+DEFAULT_TEMPLATE_NAME = "tasks_template.xlsx"
+
 
 def _is_primitive(x: Any) -> bool:
     return x is None or isinstance(x, (str, int, float, bool))
@@ -88,15 +92,18 @@ def write_tasks_xlsx(
     out_dir: str,
     extra_headers: Iterable[str] = (),
     project_sheet_rows: Optional[Iterable[Iterable[Any]]] = None,
+    template_path: Optional[str] = None,
 ) -> str:
     """
     Write tasks to an .xlsx file with a header containing the union of all
-    flattened keys. A "project" sheet is created as the left-most sheet using
+    flattened keys. The workbook is based on a template Excel file
+    (``excel_template/tasks_template.xlsx`` by default) so that existing
+    formatting/VBA can be preserved. A "project" sheet is populated using
     ``project_sheet_rows`` if provided. Returns the absolute path to the written
-    file.
+    file. Provide ``template_path`` to override the template location.
     """
     try:
-        from openpyxl import Workbook
+        from openpyxl import load_workbook
         from openpyxl.styles import PatternFill, Protection
         from openpyxl.utils import get_column_letter
         from openpyxl.formatting.rule import FormulaRule
@@ -113,42 +120,78 @@ def write_tasks_xlsx(
 
     # First flatten rows; keep in memory for simplicity and consistent headers
     flat_rows: List[Dict[str, Any]] = [flatten_dict(t) for t in tasks]
+    project_rows_list: List[List[Any]] = [list(r) if isinstance(r, (list, tuple)) else list(r or []) for r in project_sheet_rows or []]
     headers = collect_headers(flat_rows, extra_headers=extra_headers)
 
-    wb = Workbook()
-    ws_project = wb.active
-    ws_project.title = "project"
+    template_candidate = template_path or os.path.join(
+        EXCEL_TEMPLATE_DIR, DEFAULT_TEMPLATE_NAME
+    )
+    template_candidate = os.path.abspath(template_candidate)
+    if not os.path.exists(template_candidate):
+        raise FileNotFoundError(
+            "Excel template not found. Place 'tasks_template.xlsx' under the "
+            "'excel_template' directory or provide template_path explicitly."
+        )
 
-    for row in project_sheet_rows or []:
-        ws_project.append([_sanitize(c) for c in row])
+    wb = load_workbook(template_candidate)
 
-    ws_tasks = wb.create_sheet("tasks")
-    ws_tasks.append([_sanitize(h) for h in headers])
+    def _ensure_sheet(name: str):
+        if name in wb.sheetnames:
+            return wb[name]
+        return wb.create_sheet(title=name)
 
-    # Rows
-    for row in flat_rows:
-        ws_tasks.append([_sanitize(row.get(h)) for h in headers])
+    def _clear_values(ws):
+        max_row = ws.max_row or 0
+        max_col = ws.max_column or 0
+        if max_row <= 0 or max_col <= 0:
+            return
+        for row in ws.iter_rows(min_row=1, min_col=1, max_row=max_row, max_col=max_col):
+            for cell in row:
+                cell.value = None
 
-    # Mirror original values on a hidden sheet for change tracking
-    ws_orig = wb.create_sheet("_original")
-    ws_orig.append([_sanitize(h) for h in headers])
-    for row in flat_rows:
-        ws_orig.append([_sanitize(row.get(h)) for h in headers])
+    ws_project = _ensure_sheet("project")
+    if project_rows_list:
+        _clear_values(ws_project)
+    for row_idx, row in enumerate(project_rows_list, start=1):
+        for col_idx, value in enumerate(row, start=1):
+            ws_project.cell(row=row_idx, column=col_idx, value=_sanitize(value))
+
+    ws_tasks = _ensure_sheet("tasks")
+    _clear_values(ws_tasks)
+    for col_idx, header in enumerate(headers, start=1):
+        ws_tasks.cell(row=1, column=col_idx, value=_sanitize(header))
+    for row_idx, row in enumerate(flat_rows, start=2):
+        for col_idx, header in enumerate(headers, start=1):
+            ws_tasks.cell(row=row_idx, column=col_idx, value=_sanitize(row.get(header)))
+
+    ws_orig = _ensure_sheet("_original")
+    _clear_values(ws_orig)
+    for col_idx, header in enumerate(headers, start=1):
+        ws_orig.cell(row=1, column=col_idx, value=_sanitize(header))
+    for row_idx, row in enumerate(flat_rows, start=2):
+        for col_idx, header in enumerate(headers, start=1):
+            ws_orig.cell(row=row_idx, column=col_idx, value=_sanitize(row.get(header)))
     ws_orig.sheet_state = "hidden"
 
     # Highlight cells edited by users compared to the original sheet
-    max_col_letter = get_column_letter(len(headers))
-    max_row = len(flat_rows) + 1
-    data_range = f"A1:{max_col_letter}{max_row}"
-    yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-    ws_tasks.conditional_formatting.add(
-        data_range, FormulaRule(formula=["A1<>_original!A1"], fill=yellow_fill)
-    )
+    if headers:
+        max_col_letter = get_column_letter(len(headers))
+        max_row = len(flat_rows) + 1
+        data_range = f"A1:{max_col_letter}{max_row}"
+        yellow_fill = PatternFill(
+            start_color="FFFF00", end_color="FFFF00", fill_type="solid"
+        )
+        ws_tasks.conditional_formatting.add(
+            data_range, FormulaRule(formula=["A1<>_original!A1"], fill=yellow_fill)
+        )
 
-    # Allow editing cells but disallow row/column manipulation
-    for row in ws_tasks.iter_rows(min_row=1, max_row=max_row, max_col=len(headers)):
-        for cell in row:
-            cell.protection = Protection(locked=False)
+        # Allow editing cells but disallow row/column manipulation
+        for row in ws_tasks.iter_rows(
+            min_row=1, max_row=max_row, max_col=len(headers)
+        ):
+            for cell in row:
+                cell.protection = Protection(locked=False)
+
     ws_tasks.protection = SheetProtection(
         sheet=True,
         formatColumns=False,

@@ -1,0 +1,421 @@
+'================================================================================
+' iQUAVIS 反映用 VBA モジュール
+'--------------------------------------------------------------------------------
+' 以下のコードを Excel テンプレートに組み込み、ボタン（「iQUAVISサーバーに反映」）
+' から `RunIQuavisSync` を呼び出してください。
+'
+' 【構成】
+'   1. ThisWorkbook モジュール: 起動時にランチャーフォームを表示
+'   2. ユーザーフォーム `frmIQuavisLauncher`: ボタン 1 個 (Caption: "iQUAVISサーバーに反映")
+'   3. 標準モジュール `modIQuavisSync`: 反映処理本体
+'
+' 【参照設定】
+'   - [ツール] → [参照設定] で以下にチェック
+'       * Microsoft Scripting Runtime
+'       * Microsoft WinHTTP Services
+'
+' 【Named Range (任意設定例)】
+'   - `IQUAVIS_BaseUrl`     : API のベース URL（例: https://example.local/iquavis-api）
+'   - `IQUAVIS_BearerToken` : 認証済みの Bearer Token
+'   - `IQUAVIS_ProjectId`   : 反映対象プロジェクト ID（必要に応じて）
+'
+'================================================================================
+' ThisWorkbook モジュールに配置
+'================================================================================
+Option Explicit
+
+Private Sub Workbook_Open()
+    On Error Resume Next
+    frmIQuavisLauncher.Show
+    On Error GoTo 0
+End Sub
+
+'================================================================================
+' ユーザーフォーム (frmIQuavisLauncher) のコードビハインド
+'--------------------------------------------------------------------------------
+' ・CommandButton (Name: cmdSync, Caption: "iQUAVISサーバーに反映") を配置してください。
+' ・ユーザーフォームの Caption は任意（例: "iQUAVIS 連携"）。
+'================================================================================
+Option Explicit
+
+Private Sub cmdSync_Click()
+    On Error GoTo EH
+    RunIQuavisSync
+    Exit Sub
+EH:
+    MsgBox "マクロ実行中にエラーが発生しました: " & Err.Description, vbCritical
+End Sub
+
+'================================================================================
+' 標準モジュール (modIQuavisSync)
+'================================================================================
+Option Explicit
+
+Public Sub RunIQuavisSync()
+    Dim answer As VbMsgBoxResult
+    answer = MsgBox("エクセルの変更内容をiQUAVISサーバーに送信しますか？", _
+                    vbQuestion + vbYesNo + vbDefaultButton2, _
+                    "iQUAVISサーバーに反映")
+    If answer <> vbYes Then
+        Exit Sub
+    End If
+
+    Dim wsTasks As Worksheet
+    Dim wsOriginal As Worksheet
+    Dim wb As Workbook
+    Set wb = ThisWorkbook
+
+    On Error Resume Next
+    Set wsTasks = wb.Worksheets("tasks")
+    Set wsOriginal = wb.Worksheets("_original")
+    On Error GoTo 0
+
+    If wsTasks Is Nothing Or wsOriginal Is Nothing Then
+        MsgBox "tasks シートまたは _original シートが見つかりません。テンプレートを確認してください。", vbCritical
+        Exit Sub
+    End If
+
+    Dim headers As Variant
+    headers = GetHeaderRow(wsTasks)
+    If IsEmpty(headers) Then
+        MsgBox "ヘッダー行が取得できませんでした。", vbCritical
+        Exit Sub
+    End If
+
+    Dim changedRows As Collection
+    Set changedRows = CollectChangedRows(wsTasks, wsOriginal, headers)
+
+    If changedRows.Count = 0 Then
+        MsgBox "変更されたタスクはありません。", vbInformation
+        Exit Sub
+    End If
+
+    Dim baseUrl As String
+    Dim bearerToken As String
+    baseUrl = GetNamedValue("IQUAVIS_BaseUrl")
+    bearerToken = GetNamedValue("IQUAVIS_BearerToken")
+
+    If Len(baseUrl) = 0 Or Len(bearerToken) = 0 Then
+        MsgBox "API の接続情報（BaseUrl / BearerToken）が設定されていません。", vbCritical
+        Exit Sub
+    End If
+
+    Dim succeeded As Long
+    Dim failed As Long
+    Dim idx As Long
+
+    On Error GoTo HANDLE_FATAL
+    Application.ScreenUpdating = False
+
+    For idx = 1 To changedRows.Count
+        Dim rowInfo As Object
+        Set rowInfo = changedRows(idx)
+
+        Dim payload As String
+        payload = BuildTaskPayload(headers, rowInfo)
+
+        If Len(rowInfo("TaskId")) = 0 Then
+            Dim idError As String
+            idError = MarkCellError(wsTasks, rowInfo("RowIndex"), 1, "Id 列が空のため API を呼び出せません。")
+            Err.Raise vbObjectError + 10, , idError
+        Else
+            If SendIQuavisRequest(baseUrl, bearerToken, rowInfo("TaskId"), payload) Then
+                succeeded = succeeded + 1
+                PaintRow wsTasks, rowInfo("RowIndex"), RGB(0, 112, 192) ' 青系
+                PaintRow wsOriginal, rowInfo("RowIndex"), -1
+                CopyRowValues wsTasks, wsOriginal, rowInfo("RowIndex"), headers
+            Else
+                failed = failed + 1
+            End If
+        End If
+    Next idx
+
+    Application.ScreenUpdating = True
+
+    Dim summary As String
+    summary = "API 更新結果" & vbCrLf & _
+              "成功: " & succeeded & " 件" & vbCrLf & _
+              "失敗: " & failed & " 件"
+    MsgBox summary, vbInformation
+    Exit Sub
+
+HANDLE_FATAL:
+    Application.ScreenUpdating = True
+    MsgBox "マクロ実行中にエラーが発生しました: " & Err.Description, vbCritical
+End Sub
+
+'--------------------------------------------------------------------------------
+' ヘッダー取得
+'--------------------------------------------------------------------------------
+Private Function GetHeaderRow(ws As Worksheet) As Variant
+    Dim lastCol As Long
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+    If lastCol < 1 Then Exit Function
+    Dim raw As Variant
+    raw = ws.Range(ws.Cells(1, 1), ws.Cells(1, lastCol)).Value
+    If IsArray(raw) Then
+        GetHeaderRow = Application.Transpose(Application.Transpose(raw))
+    Else
+        Dim singleArr(1 To 1) As Variant
+        singleArr(1) = raw
+        GetHeaderRow = singleArr
+    End If
+End Function
+
+'--------------------------------------------------------------------------------
+' 変更行の収集
+'--------------------------------------------------------------------------------
+Private Function CollectChangedRows(wsTasks As Worksheet, _
+                                    wsOriginal As Worksheet, _
+                                    headers As Variant) As Collection
+    Dim results As New Collection
+
+    Dim lastRow As Long
+    lastRow = wsTasks.Cells(wsTasks.Rows.Count, 1).End(xlUp).Row
+    Dim headerCount As Long
+    headerCount = HeaderCount(headers)
+    If headerCount = 0 Then Exit Function
+
+    Dim r As Long, c As Long
+    For r = 2 To lastRow
+        Dim hasDiff As Boolean
+        hasDiff = False
+        For c = 1 To headerCount
+            Dim taskValue As Variant
+            Dim origValue As Variant
+            taskValue = wsTasks.Cells(r, c).Value
+            origValue = wsOriginal.Cells(r, c).Value
+            If Not ValuesEqual(taskValue, origValue) Then
+                hasDiff = True
+                Exit For
+            End If
+        Next c
+
+        If hasDiff Then
+            Dim rowInfo As Object
+            Set rowInfo = CreateObject("Scripting.Dictionary")
+            rowInfo("RowIndex") = r
+            rowInfo("TaskId") = CStr(wsTasks.Cells(r, 1).Value)
+            rowInfo("Values") = wsTasks.Range(wsTasks.Cells(r, 1), wsTasks.Cells(r, headerCount)).Value
+            results.Add rowInfo
+        End If
+    Next r
+
+    Set CollectChangedRows = results
+End Function
+
+Private Function ValuesEqual(ByVal a As Variant, ByVal b As Variant) As Boolean
+    If IsNull(a) Xor IsNull(b) Then Exit Function
+    If IsEmpty(a) Xor IsEmpty(b) Then Exit Function
+    If VarType(a) = vbString Or VarType(b) = vbString Then
+        ValuesEqual = (CStr(a) = CStr(b))
+    ElseIf IsNumeric(a) And IsNumeric(b) Then
+        ValuesEqual = (CDbl(a) = CDbl(b))
+    ElseIf IsDate(a) And IsDate(b) Then
+        ValuesEqual = (CDate(a) = CDate(b))
+    Else
+        ValuesEqual = (CStr(a) = CStr(b))
+    End If
+End Function
+
+'--------------------------------------------------------------------------------
+' ヘッダー数の算出
+'--------------------------------------------------------------------------------
+Private Function HeaderCount(headers As Variant) As Long
+    If IsEmpty(headers) Then Exit Function
+    If IsArray(headers) Then
+        HeaderCount = UBound(headers) - LBound(headers) + 1
+    Else
+        HeaderCount = 1
+    End If
+End Function
+
+'--------------------------------------------------------------------------------
+' 行の JSON 生成 & 型変換
+'--------------------------------------------------------------------------------
+Private Function BuildTaskPayload(headers As Variant, rowInfo As Object) As String
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
+
+    Dim headerCount As Long
+    headerCount = HeaderCount(headers)
+    Dim baseIndex As Long
+    baseIndex = LBound(headers)
+
+    Dim col As Long
+    For col = 1 To headerCount
+        Dim header As String
+        header = CStr(headers(baseIndex + col - 1))
+        Dim rawValue As Variant
+        rawValue = rowInfo("Values")(1, col)
+        Dim originalValue As Variant
+        originalValue = Nothing
+
+        On Error Resume Next
+        originalValue = ThisWorkbook.Worksheets("_original").Cells(rowInfo("RowIndex"), col).Value
+        On Error GoTo 0
+
+        Dim coerced As Variant
+        On Error GoTo COERCE_FAIL
+        coerced = CoerceValue(header, rawValue, originalValue)
+        On Error GoTo 0
+        dict(header) = coerced
+        GoTo NEXT_COL
+
+COERCE_FAIL:
+        Dim convError As String
+        convError = MarkCellError(ThisWorkbook.Worksheets("tasks"), rowInfo("RowIndex"), col, _
+                                  header & " : " & Err.Description)
+        Err.Raise Err.Number, , convError
+
+NEXT_COL:
+    Next col
+
+    BuildTaskPayload = EncodeJsonDictionary(dict)
+End Function
+
+Private Function CoerceValue(header As String, rawValue As Variant, originalValue As Variant) As Variant
+    If IsEmpty(rawValue) Or Len(Trim$(CStr(rawValue))) = 0 Then
+        CoerceValue = Null
+        Exit Function
+    End If
+
+    Dim keyLower As String
+    keyLower = LCase$(header)
+
+    On Error GoTo FAIL_CONVERT
+
+    If Right$(keyLower, 4) = "date" Then
+        If Not IsDate(rawValue) Then Err.Raise vbObjectError + 100, , "日付形式ではありません。"
+        CoerceValue = Format$(CDate(rawValue), "yyyy-mm-dd\THH:NN:SS")
+    ElseIf Right$(keyLower, 2) = "id" Or InStr(keyLower, "hour") > 0 Or InStr(keyLower, "rate") > 0 Then
+        If Not IsNumeric(rawValue) Then Err.Raise vbObjectError + 101, , "数値ではありません。"
+        CoerceValue = CLng(rawValue)
+    ElseIf Left$(keyLower, 6) = "enable" Then
+        If VarType(rawValue) = vbBoolean Then
+            CoerceValue = rawValue
+        ElseIf LCase$(CStr(rawValue)) = "true" Or rawValue = "1" Then
+            CoerceValue = True
+        ElseIf LCase$(CStr(rawValue)) = "false" Or rawValue = "0" Then
+            CoerceValue = False
+        Else
+            Err.Raise vbObjectError + 102, , "真偽値として解釈できません。"
+        End If
+    ElseIf IsNumeric(originalValue) Then
+        If Not IsNumeric(rawValue) Then Err.Raise vbObjectError + 103, , "数値ではありません。"
+        CoerceValue = CDbl(rawValue)
+    Else
+        CoerceValue = CStr(rawValue)
+    End If
+End Function
+
+Private Function MarkCellError(ws As Worksheet, rowIndex As Long, colIndex As Long, message As String) As String
+    Dim addr As String
+    addr = ws.Cells(rowIndex, colIndex).Address(False, False)
+    With ws.Cells(rowIndex, colIndex).Interior
+        .Pattern = xlSolid
+        .Color = RGB(255, 0, 0)
+    End With
+    MarkCellError = "セル " & addr & " : " & message
+End Function
+
+'--------------------------------------------------------------------------------
+' JSON エンコード
+'--------------------------------------------------------------------------------
+Private Function EncodeJsonDictionary(dict As Object) As String
+    Dim key As Variant
+    Dim parts() As String
+    ReDim parts(0 To dict.Count - 1) As String
+    Dim idx As Long
+
+    For Each key In dict.Keys
+        parts(idx) = """" & EscapeJsonText(CStr(key)) & """:" & EncodeJsonValue(dict(key))
+        idx = idx + 1
+    Next key
+
+    EncodeJsonDictionary = "{" & Join(parts, ",") & "}"
+End Function
+
+Private Function EncodeJsonValue(value As Variant) As String
+    If IsNull(value) Then
+        EncodeJsonValue = "null"
+    ElseIf VarType(value) = vbBoolean Then
+        EncodeJsonValue = LCase$(CStr(value))
+    ElseIf IsNumeric(value) Then
+        EncodeJsonValue = CStr(value)
+    Else
+        EncodeJsonValue = """" & EscapeJsonText(CStr(value)) & """
+    End If
+End Function
+
+Private Function EscapeJsonText(text As String) As String
+    text = Replace(text, "\", "\\")
+    text = Replace(text, """", "\"")
+    text = Replace(text, vbCr, "\r")
+    text = Replace(text, vbLf, "\n")
+    EscapeJsonText = text
+End Function
+
+'--------------------------------------------------------------------------------
+' API 呼び出し
+'--------------------------------------------------------------------------------
+Private Function SendIQuavisRequest(baseUrl As String, bearerToken As String, _
+                                    taskId As String, payload As String) As Boolean
+    On Error GoTo FAILED
+
+    Dim http As Object
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+
+    Dim url As String
+    url = baseUrl & "/tasks/" & taskId
+
+    http.Open "PATCH", url, False
+    http.setRequestHeader "Content-Type", "application/json"
+    http.setRequestHeader "Authorization", "Bearer " & bearerToken
+    http.Send payload
+
+    If http.Status >= 200 And http.Status < 300 Then
+        SendIQuavisRequest = True
+    Else
+        MsgBox "タスクID=" & taskId & " の更新に失敗しました: " & http.Status & " " & http.StatusText & vbCrLf & http.ResponseText, vbCritical
+        SendIQuavisRequest = False
+    End If
+    Exit Function
+
+FAILED:
+    MsgBox "タスクID=" & taskId & " の送信中にエラー: " & Err.Description, vbCritical
+    SendIQuavisRequest = False
+End Function
+
+'--------------------------------------------------------------------------------
+' 補助関数
+'--------------------------------------------------------------------------------
+Private Function GetNamedValue(name As String) As String
+    On Error GoTo NO_NAME
+    GetNamedValue = Trim$(CStr(ThisWorkbook.Names(name).RefersToRange.Value))
+    Exit Function
+NO_NAME:
+    GetNamedValue = ""
+End Function
+
+Private Sub PaintRow(ws As Worksheet, rowIndex As Long, colorValue As Long)
+    Dim lastCol As Long
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+    Dim rng As Range
+    Set rng = ws.Range(ws.Cells(rowIndex, 1), ws.Cells(rowIndex, lastCol))
+    If colorValue < 0 Then
+        rng.Interior.Pattern = xlNone
+    Else
+        rng.Interior.Pattern = xlSolid
+        rng.Interior.Color = colorValue
+    End If
+End Sub
+
+Private Sub CopyRowValues(wsSource As Worksheet, wsTarget As Worksheet, rowIndex As Long, headers As Variant)
+    Dim headerCount As Long
+    headerCount = HeaderCount(headers)
+    If headerCount = 0 Then Exit Sub
+    wsTarget.Range(wsTarget.Cells(rowIndex, 1), wsTarget.Cells(rowIndex, headerCount)).Value = _
+        wsSource.Range(wsSource.Cells(rowIndex, 1), wsSource.Cells(rowIndex, headerCount)).Value
+End Sub
+
