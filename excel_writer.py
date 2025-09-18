@@ -7,7 +7,7 @@ ILLEGAL_CHARACTERS_RE = re.compile(r"[\x00-\x08\x0B-\x0C\x0E-\x1F]")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 EXCEL_TEMPLATE_DIR = os.path.join(BASE_DIR, "excel_template")
-DEFAULT_TEMPLATE_NAME = "tasks_template.xlsx"
+DEFAULT_TEMPLATE_NAME = "iquavis_tasks.xlsm"
 
 
 def _is_primitive(x: Any) -> bool:
@@ -95,12 +95,15 @@ def write_tasks_xlsx(
     template_path: Optional[str] = None,
 ) -> str:
     """
-    Write tasks to an .xlsx file with a header containing the union of all
+    Write tasks to an Excel file with a header containing the union of all
     flattened keys. The workbook is based on a template Excel file
-    (``excel_template/tasks_template.xlsx`` by default) so that existing
+    (``excel_template/iquavis_tasks.xlsm`` by default) so that existing
     formatting/VBA can be preserved. A "project" sheet is populated using
     ``project_sheet_rows`` if provided. Returns the absolute path to the written
-    file. Provide ``template_path`` to override the template location.
+    file. Provide ``template_path`` to override the template location. When the
+    template is macro-enabled (``.xlsm``), VBA content is retained and the
+    output file also uses ``.xlsm``. Otherwise, the export falls back to
+    ``.xlsx``.
     """
     try:
         from openpyxl import load_workbook
@@ -110,7 +113,7 @@ def write_tasks_xlsx(
         from openpyxl.worksheet.protection import SheetProtection
     except Exception as e:
         raise RuntimeError(
-            "openpyxl is required to export .xlsx. Please install via 'pip install openpyxl'."
+            "openpyxl is required to export Excel files. Please install via 'pip install openpyxl'."
         ) from e
 
     def _sanitize(value: Any) -> Any:
@@ -129,11 +132,13 @@ def write_tasks_xlsx(
     template_candidate = os.path.abspath(template_candidate)
     if not os.path.exists(template_candidate):
         raise FileNotFoundError(
-            "Excel template not found. Place 'tasks_template.xlsx' under the "
+            "Excel template not found. Place 'iquavis_tasks.xlsm' under the "
             "'excel_template' directory or provide template_path explicitly."
         )
 
-    wb = load_workbook(template_candidate)
+    template_ext = os.path.splitext(template_candidate)[1].lower()
+    keep_vba = template_ext == ".xlsm"
+    wb = load_workbook(template_candidate, keep_vba=keep_vba)
 
     def _ensure_sheet(name: str):
         if name in wb.sheetnames:
@@ -206,7 +211,8 @@ def write_tasks_xlsx(
     )
 
     safe_name = sanitize_filename(project_name)
-    file_name = f"tasks_{safe_name}.xlsx"
+    output_ext = ".xlsm" if keep_vba else ".xlsx"
+    file_name = f"tasks_{safe_name}{output_ext}"
     out_path = next_available_path(out_dir, file_name)
 
     wb.save(out_path)

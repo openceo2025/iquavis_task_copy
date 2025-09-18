@@ -151,7 +151,7 @@ def select_existing_excel_file() -> str:
         root.withdraw()
         path = filedialog.askopenfilename(
             title="Select existing Excel file (Cancel for none)",
-            filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")],
+            filetypes=[("Excel files", "*.xlsm *.xlsx *.xls"), ("All files", "*.*")],
         )
         root.destroy()
         return path.strip()
